@@ -33,6 +33,14 @@ AUDIT_FILE_EXTENSIONS = [
 MAX_FILE_CHARS = int(os.getenv("MAX_FILE_CHARS", "10000"))
 MAX_CONTEXT_FILES = int(os.getenv("MAX_CONTEXT_FILES", "80"))
 
+# ────────────────── 飞书 RAG 配置 ──────────────────
+FEISHU_APP_ID = (os.getenv("FEISHU_APP_ID") or "").strip()
+FEISHU_APP_SECRET = (os.getenv("FEISHU_APP_SECRET") or "").strip()
+FEISHU_WIKI_URL = (os.getenv("FEISHU_WIKI_URL") or "").strip()
+FEISHU_DOC_TITLE_KEYWORD = (
+    os.getenv("FEISHU_DOC_TITLE_KEYWORD") or "代码规范"
+).strip()
+
 # ────────────────── 日志配置 ──────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -85,6 +93,10 @@ class AuditRequest(BaseModel):
         default="full",
         description="审计模式: full (详细报告) 或 brief (简要报告，仅位置+风险+修复)",
     )
+    use_feishu_standard: bool = Field(
+        default=False,
+        description="是否从飞书知识库检索企业代码规范并作为 RAG 上下文注入审计",
+    )
 
 
 class ProjectProfileResponse(BaseModel):
@@ -106,6 +118,7 @@ class AuditResponse(BaseModel):
     project_profile: Optional[ProjectProfileResponse] = None
     experts_used: Optional[List[str]] = None
     files_audited: int = 0
+    feishu_standard_used: str = ""
 
 
 # ────────────────── API 端点 ──────────────────
@@ -123,7 +136,7 @@ async def audit_code(request: AuditRequest):
     5. 返回审计报告 + 项目画像
     6. 自动清理临时文件
     """
-    from services.audit_engine import run_audit
+    from services.audit_engine import FeishuConfig, run_audit
     from services.git_service import clone_repo, verify_repo_accessible
     from utils.file_manager import cleanup_repo
 
@@ -147,10 +160,19 @@ async def audit_code(request: AuditRequest):
         if clone_err:
             return AuditResponse(success=False, message=clone_err)
 
-        # 3 + 4. 执行自适应审计
+        # 3 + 4. 构建飞书配置 + 执行自适应审计
+        feishu_cfg = FeishuConfig(
+            enabled=request.use_feishu_standard,
+            app_id=FEISHU_APP_ID,
+            app_secret=FEISHU_APP_SECRET,
+            wiki_url=FEISHU_WIKI_URL,
+            doc_title_keyword=FEISHU_DOC_TITLE_KEYWORD,
+        )
+
         logger.info(
-            "开始审计 (mode=%s)，审计需求: %s",
-            request.mode, request.audit_prompt[:100],
+            "开始审计 (mode=%s, feishu_rag=%s)，审计需求: %s",
+            request.mode, request.use_feishu_standard,
+            request.audit_prompt[:100],
         )
         result = await run_audit(
             repo_path=repo_path,
@@ -162,6 +184,7 @@ async def audit_code(request: AuditRequest):
             model=OPENAI_MODEL,
             max_context_files=MAX_CONTEXT_FILES,
             mode=request.mode,
+            feishu_config=feishu_cfg,
         )
 
         # 5. 构建响应
@@ -184,6 +207,7 @@ async def audit_code(request: AuditRequest):
             project_profile=profile_resp,
             experts_used=result.experts_used,
             files_audited=result.files_audited,
+            feishu_standard_used=result.feishu_standard_used,
         )
 
     finally:

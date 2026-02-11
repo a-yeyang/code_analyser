@@ -1,12 +1,15 @@
 """
 prompt_library.py - 动态提示词管理器
 
-根据 ProjectProfile 自动组合「通用安全基座 + 语言专家 + 框架专家」三层提示词，
-使 LLM 输出更具针对性的审计报告。
+根据 ProjectProfile 自动组合「通用安全基座 + 语言专家 + 框架专家 + RAG 规范」
+多层提示词，使 LLM 输出更具针对性的审计报告。
 
 支持审计模式：
   - full:  详细模式（默认），输出完整的结构化审计报告
   - brief: 简要模式，仅输出位置 + 风险 + 最小修复方案
+
+支持 RAG 注入：
+  - 当提供 standard_context 时，将企业私有代码规范作为额外审计基准注入 Prompt
 
 设计原则：
   - 所有 Prompt 均为纯文本常量，便于版本管理和快速迭代。
@@ -20,7 +23,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 from services.project_profiler import Language, ProjectProfile
 
@@ -176,7 +179,25 @@ BRIEF_FORMAT_PROMPT = """\
 如果没有发现风险，仅回复：'未发现明显安全风险。'
 """
 
-# ────────── 5. 用户请求模板 ──────────
+# ────────── 5. RAG 企业规范注入 Prompt ──────────
+
+RAG_ADAPTIVE_PROMPT = """\
+
+## 企业私有代码规范（RAG 注入）
+你现在的审计基准不仅包含上述通用安全标准，还必须严格遵守以下【企业私有代码规范】。
+该规范来源于：{standard_source}
+
+---
+{feishu_standard_text}
+---
+
+请在审计中额外执行以下检查：
+1. 找出代码中不符合上述私有规范的地方。
+2. 对每个违规项在报告中明确标注"**违反私有规范**"。
+3. 给出对应的规范条款引用和修复建议。
+"""
+
+# ────────── 6. 用户请求模板 ──────────
 
 USER_PROMPT_TEMPLATE = """\
 ## 项目画像
@@ -213,12 +234,25 @@ _FRAMEWORK_EXPERT_MAP = {
 
 
 @dataclass
+class StandardContext:
+    """
+    企业规范上下文，用于 RAG 注入。
+
+    Attributes:
+        text:   规范文本内容（已按语言过滤和截断）
+        source: 来源说明（如 "飞书知识库文档《Java代码规范》"）
+    """
+    text: str = ""
+    source: str = ""
+
+
+@dataclass
 class ComposedPrompt:
     """
     组合后的提示词结果。
 
     Attributes:
-        system_prompt: 拼接完成的 SYSTEM_PROMPT（基座 + 语言 + 框架）
+        system_prompt: 拼接完成的 SYSTEM_PROMPT（基座 + 语言 + 框架 + RAG）
         experts_used:  本次使用的专家标签列表，用于日志和报告
     """
     system_prompt: str
@@ -242,13 +276,19 @@ class PromptLibrary:
         self,
         profile: ProjectProfile,
         mode: str = AUDIT_MODE_FULL,
+        standard_context: Optional[StandardContext] = None,
     ) -> ComposedPrompt:
         """
-        根据项目画像和审计模式组合 SYSTEM_PROMPT。
+        根据项目画像、审计模式和企业规范组合 SYSTEM_PROMPT。
+
+        组合顺序（优先级从低到高）：
+          基座 → 语言专家 → 框架专家 → RAG 规范 → 审计模式格式
+        brief 模式的格式指令始终在最末尾，确保覆盖前面的详细输出要求。
 
         Args:
-            profile: identify_project_context 返回的项目画像
-            mode:    审计模式 ("full" | "brief")
+            profile:          identify_project_context 返回的项目画像
+            mode:             审计模式 ("full" | "brief")
+            standard_context: 飞书企业规范上下文（可选，来自 FeishuClient）
 
         Returns:
             ComposedPrompt（包含完整 system_prompt 和使用的专家列表）
@@ -279,6 +319,15 @@ class PromptLibrary:
         if profile.has_mybatis and MYBATIS_EXPERT_PROMPT not in parts:
             parts.append(MYBATIS_EXPERT_PROMPT)
             experts.append("MyBatis SQL 专家")
+
+        # ── RAG 企业规范注入 ──
+        if standard_context and standard_context.text:
+            rag_prompt = RAG_ADAPTIVE_PROMPT.format(
+                standard_source=standard_context.source,
+                feishu_standard_text=standard_context.text,
+            )
+            parts.append(rag_prompt)
+            experts.append(f"企业规范 RAG ({standard_context.source})")
 
         # ── 审计模式格式指令（放在最末尾，优先级最高）──
         if mode == AUDIT_MODE_BRIEF:
