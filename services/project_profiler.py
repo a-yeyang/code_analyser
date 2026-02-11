@@ -139,6 +139,8 @@ class ProjectProfile:
         config_files:       检测到的配置文件名列表
         total_code_files:   代码文件总数
         scale:              项目规模等级
+        dependency_map:     文件间依赖映射 {文件路径: [依赖文件路径列表]}
+                            由静态分析模块在审计流程中填充
     """
     primary_language: Language = Language.UNKNOWN
     language_stats: Dict[str, int] = field(default_factory=dict)
@@ -148,6 +150,7 @@ class ProjectProfile:
     config_files: List[str] = field(default_factory=list)
     total_code_files: int = 0
     scale: ProjectScale = ProjectScale.SMALL
+    dependency_map: Dict[str, List[str]] = field(default_factory=dict)
 
     def summary(self) -> str:
         """返回人类可读的项目画像摘要（用于日志和 Prompt 拼接）。"""

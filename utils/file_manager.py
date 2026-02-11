@@ -291,6 +291,109 @@ def build_code_context(
 
 
 # ──────────────────────────────────────────────
+#  跨文件上下文注入（深度上下文增强钩子）
+# ──────────────────────────────────────────────
+
+def inject_cross_file_context(
+    context: List[Dict[str, str]],
+    repo_path: Path,
+    profile: ProjectProfile,
+    max_snippet_chars: int = 5000,
+    max_deps_per_file: int = 5,
+) -> List[Dict[str, str]]:
+    """
+    为已筛选的核心文件注入跨文件依赖上下文。
+
+    遍历 context 中的每个核心文件，调用静态分析器提取其项目内部
+    依赖（被调用的函数/类定义），并作为"关联引用"追加到上下文列表中。
+
+    这是 build_code_context 的增强钩子：主流程先调用 build_code_context
+    构建基础上下文，再调用本函数注入依赖上下文。
+
+    失败时优雅降级：任何异常只影响单个文件的依赖分析，不影响整体。
+
+    Args:
+        context:           build_code_context 返回的基础上下文列表
+        repo_path:         仓库本地路径
+        profile:           项目画像
+        max_snippet_chars: 每个依赖代码片段的最大字符数
+        max_deps_per_file: 每个核心文件最多注入的依赖片段数
+
+    Returns:
+        增强后的上下文列表（原始文件 + 关联依赖片段）
+    """
+    # 延迟导入，避免模块加载时的循环依赖
+    from utils.static_analyzer import analyze_file_dependencies
+
+    enriched = list(context)  # 浅拷贝，不修改原列表
+
+    # 记录已存在的路径和已注入的依赖键，避免重复
+    seen_main_paths = {item["path"] for item in context}
+    seen_dep_keys: Set[str] = set()
+
+    dep_blocks: List[Dict[str, str]] = []
+    total_injected = 0
+
+    for item in context:
+        file_path = repo_path / item["path"]
+        if not file_path.exists():
+            continue
+
+        try:
+            dep = analyze_file_dependencies(
+                file_path=file_path,
+                repo_root=repo_path,
+                language=profile.primary_language,
+                max_snippet_chars=max_snippet_chars,
+            )
+        except Exception as exc:
+            logger.debug(
+                "跳过文件 %s 的依赖分析（解析失败: %s）",
+                item["path"], exc,
+            )
+            continue
+
+        added_for_file = 0
+        for snippet in dep.resolved_snippets:
+            if added_for_file >= max_deps_per_file:
+                break
+
+            # 跳过已作为主文件存在的依赖
+            if snippet.file_path in seen_main_paths:
+                continue
+
+            # 按 "文件::符号" 去重
+            dep_key = f"{snippet.file_path}::{snippet.symbol_name}"
+            if dep_key in seen_dep_keys:
+                continue
+            seen_dep_keys.add(dep_key)
+
+            dep_blocks.append({
+                "path": f"[关联依赖] {snippet.file_path} → {snippet.symbol_name}",
+                "content": (
+                    f"// 以下代码来自 {snippet.file_path}，"
+                    f"被 {item['path']} 引用\n"
+                    f"// 符号: {snippet.symbol_name}"
+                    f"{f' (行 {snippet.start_line}-{snippet.end_line})' if snippet.start_line else ''}"
+                    f"\n\n{snippet.content}"
+                ),
+                "type": "dependency",
+            })
+            added_for_file += 1
+            total_injected += 1
+
+    enriched.extend(dep_blocks)
+
+    if total_injected > 0:
+        logger.info(
+            "跨文件上下文增强: 注入了 %d 个关联依赖代码片段",
+            total_injected,
+        )
+
+    return enriched
+
+
+# ──────────────────────────────────────────────
 #  目录清理
 # ──────────────────────────────────────────────
 

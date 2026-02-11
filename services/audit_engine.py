@@ -21,7 +21,7 @@ from langchain_core.output_parsers import StrOutputParser
 
 from services.project_profiler import ProjectProfile, identify_project_context
 from services.prompt_library import PromptLibrary, USER_PROMPT_TEMPLATE
-from utils.file_manager import build_code_context
+from utils.file_manager import build_code_context, inject_cross_file_context
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +67,34 @@ def _normalize_base_url(url: str) -> str:
 
 
 def _format_code_blocks(context: List[Dict[str, str]]) -> str:
-    """将代码上下文格式化为 Prompt 中可读的文本块。"""
+    """
+    将代码上下文格式化为 Prompt 中可读的文本块。
+
+    支持两种类型的上下文项：
+      - 普通文件（type 为空或 "main"）：标记为"文件 N"
+      - 关联依赖（type == "dependency"）：标记为"关联引用"，
+        并提示 LLM 这是跨文件调用链的补充上下文
+    """
     blocks: List[str] = []
-    for i, item in enumerate(context, 1):
-        blocks.append(
-            f"### 文件 {i}: `{item['path']}`\n"
-            f"```\n{item['content']}\n```"
-        )
+    file_idx = 0
+    dep_idx = 0
+
+    for item in context:
+        if item.get("type") == "dependency":
+            dep_idx += 1
+            blocks.append(
+                f"### 关联引用 {dep_idx}: `{item['path']}`\n"
+                f"> ⚠️ 以下代码为核心文件的跨文件依赖定义，"
+                f"供你理解调用链上下文，请结合主文件一起审计。\n\n"
+                f"```\n{item['content']}\n```"
+            )
+        else:
+            file_idx += 1
+            blocks.append(
+                f"### 文件 {file_idx}: `{item['path']}`\n"
+                f"```\n{item['content']}\n```"
+            )
+
     return "\n\n".join(blocks)
 
 
@@ -192,6 +213,37 @@ async def run_audit(
         "准备审计 %d 个文件（总文件 %d）",
         len(context), profile.total_code_files,
     )
+
+    # ── Step 3.5: 跨文件依赖上下文增强 ──
+    logger.info("Step 3.5 · 正在分析跨文件依赖关系，扩充调用链上下文…")
+    try:
+        original_count = len(context)
+        context = inject_cross_file_context(
+            context=context,
+            repo_path=repo_path,
+            profile=profile,
+            max_snippet_chars=max_chars_per_file // 2,
+            max_deps_per_file=5,
+        )
+        dep_count = len(context) - original_count
+        if dep_count > 0:
+            logger.info(
+                "跨文件增强完成: 注入 %d 个关联依赖片段，上下文总条目 %d",
+                dep_count, len(context),
+            )
+            # 将依赖映射信息回写到 profile，供后续使用
+            from utils.static_analyzer import build_dependency_map
+            from utils.file_manager import get_code_files
+            all_files = get_code_files(repo_path, extensions)
+            profile.dependency_map = build_dependency_map(
+                all_files, repo_path, profile.primary_language,
+            )
+        else:
+            logger.info("未发现可解析的跨文件依赖（可能为外部依赖或不支持的语言）")
+    except Exception as exc:
+        logger.warning(
+            "跨文件依赖分析失败，降级为原始上下文（不影响主流程）: %s", exc,
+        )
 
     code_blocks = _format_code_blocks(context)
 
