@@ -81,6 +81,10 @@ class AuditRequest(BaseModel):
         default="请对该仓库进行全面的代码安全审计",
         description="自定义审计需求提示词",
     )
+    mode: str = Field(
+        default="full",
+        description="审计模式: full (详细报告) 或 brief (简要报告，仅位置+风险+修复)",
+    )
 
 
 class ProjectProfileResponse(BaseModel):
@@ -97,6 +101,7 @@ class AuditResponse(BaseModel):
     """审计响应结果。"""
     success: bool
     message: str
+    mode: str = "full"
     report: str = ""
     project_profile: Optional[ProjectProfileResponse] = None
     experts_used: Optional[List[str]] = None
@@ -143,7 +148,10 @@ async def audit_code(request: AuditRequest):
             return AuditResponse(success=False, message=clone_err)
 
         # 3 + 4. 执行自适应审计
-        logger.info("开始审计，审计需求: %s", request.audit_prompt[:100])
+        logger.info(
+            "开始审计 (mode=%s)，审计需求: %s",
+            request.mode, request.audit_prompt[:100],
+        )
         result = await run_audit(
             repo_path=repo_path,
             audit_prompt=request.audit_prompt,
@@ -153,6 +161,7 @@ async def audit_code(request: AuditRequest):
             base_url=OPENAI_BASE_URL,
             model=OPENAI_MODEL,
             max_context_files=MAX_CONTEXT_FILES,
+            mode=request.mode,
         )
 
         # 5. 构建响应
@@ -170,6 +179,7 @@ async def audit_code(request: AuditRequest):
         return AuditResponse(
             success=result.success,
             message="审计完成" if result.success else "审计失败",
+            mode=request.mode,
             report=result.report,
             project_profile=profile_resp,
             experts_used=result.experts_used,

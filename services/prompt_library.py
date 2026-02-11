@@ -4,10 +4,16 @@ prompt_library.py - 动态提示词管理器
 根据 ProjectProfile 自动组合「通用安全基座 + 语言专家 + 框架专家」三层提示词，
 使 LLM 输出更具针对性的审计报告。
 
+支持审计模式：
+  - full:  详细模式（默认），输出完整的结构化审计报告
+  - brief: 简要模式，仅输出位置 + 风险 + 最小修复方案
+
 设计原则：
   - 所有 Prompt 均为纯文本常量，便于版本管理和快速迭代。
   - PromptLibrary 作为唯一对外接口，隐藏选择逻辑。
   - 每条专家 Prompt 末尾都强制要求输出 CWE 编号和修复方案。
+  - brief 模式的格式指令放在 system_prompt 最末尾，利用 LLM
+    "指令跟随"特性覆盖前面基座中的详细输出要求。
 """
 
 from __future__ import annotations
@@ -148,7 +154,29 @@ SPRING_EXPERT_PROMPT = """\
 对以上每个发现同样给出 CWE 编号、影响范围和具体修复方案。
 """
 
-# ────────── 4. 用户请求模板 ──────────
+# ────────── 4. 审计模式格式指令 ──────────
+
+# 合法的审计模式值
+AUDIT_MODE_FULL = "full"
+AUDIT_MODE_BRIEF = "brief"
+_VALID_MODES = {AUDIT_MODE_FULL, AUDIT_MODE_BRIEF}
+
+BRIEF_FORMAT_PROMPT = """\
+
+## 简要审计指令（核心优先级）
+本次审计采用简要模式。严禁输出任何背景介绍、原理说明、安全评分或汇总表。
+仅针对每个发现的风险点，严格按以下格式输出：
+
+---
+**位置**：[目录名]/[文件名] (第 X 行 - 第 Y 行)
+**风险**：[一句话描述漏洞类型及危害]
+**修复**：[给出可直接替换的最小代码修改方案，使用 diff 或代码块格式]
+---
+
+如果没有发现风险，仅回复：'未发现明显安全风险。'
+"""
+
+# ────────── 5. 用户请求模板 ──────────
 
 USER_PROMPT_TEMPLATE = """\
 ## 项目画像
@@ -202,24 +230,34 @@ class PromptLibrary:
     动态提示词管理器。
 
     根据 ProjectProfile 自动选择并拼接多层专家 Prompt。
-    组合策略：  BASE + 语言专家 + 框架专家(们) + MyBatis 专家(可选)
+    组合策略：  BASE + 语言专家 + 框架专家(们) + MyBatis 专家(可选) + [模式格式]
 
     Usage:
         library = PromptLibrary()
-        composed = library.compose(profile)
+        composed = library.compose(profile, mode="brief")
         # composed.system_prompt 即可直接用于 ChatPromptTemplate
     """
 
-    def compose(self, profile: ProjectProfile) -> ComposedPrompt:
+    def compose(
+        self,
+        profile: ProjectProfile,
+        mode: str = AUDIT_MODE_FULL,
+    ) -> ComposedPrompt:
         """
-        根据项目画像组合 SYSTEM_PROMPT。
+        根据项目画像和审计模式组合 SYSTEM_PROMPT。
 
         Args:
             profile: identify_project_context 返回的项目画像
+            mode:    审计模式 ("full" | "brief")
 
         Returns:
             ComposedPrompt（包含完整 system_prompt 和使用的专家列表）
         """
+        # 校验 mode 合法性，非法值回退到 full
+        if mode not in _VALID_MODES:
+            logger.warning("未知审计模式 '%s'，回退为 full", mode)
+            mode = AUDIT_MODE_FULL
+
         parts: List[str] = [BASE_SYSTEM_PROMPT]
         experts: List[str] = ["通用安全基座"]
 
@@ -242,9 +280,17 @@ class PromptLibrary:
             parts.append(MYBATIS_EXPERT_PROMPT)
             experts.append("MyBatis SQL 专家")
 
+        # ── 审计模式格式指令（放在最末尾，优先级最高）──
+        if mode == AUDIT_MODE_BRIEF:
+            parts.append(BRIEF_FORMAT_PROMPT)
+            experts.append("简要模式")
+
         system_prompt = "\n".join(parts)
 
-        logger.info("已激活审计专家: %s", " → ".join(experts))
+        logger.info(
+            "已激活审计专家: %s | 模式: %s",
+            " → ".join(experts), mode,
+        )
         return ComposedPrompt(
             system_prompt=system_prompt,
             experts_used=experts,

@@ -199,22 +199,51 @@ def prioritize_files(
 #  文件读取
 # ──────────────────────────────────────────────
 
-def read_file_content(file_path: Path, max_chars: int = 10000) -> str:
+def read_file_content(
+    file_path: Path,
+    max_chars: int = 10000,
+    with_line_numbers: bool = True,
+) -> str:
     """
     安全读取单个文件内容，自动截断超长文件。
 
+    当 with_line_numbers=True 时，为每行添加行号前缀（如 "  1| ..."），
+    便于 LLM 在审计报告中精确引用代码位置（尤其是 brief 模式）。
+
     Args:
-        file_path: 文件绝对路径
-        max_chars: 最大字符数
+        file_path:         文件绝对路径
+        max_chars:         最大字符数
+        with_line_numbers: 是否为每行添加行号前缀
 
     Returns:
-        文件文本内容（可能被截断）
+        文件文本内容（可能被截断，可能带行号）
     """
     try:
-        text = file_path.read_text(encoding="utf-8", errors="replace")
-        if len(text) > max_chars:
-            text = text[:max_chars] + "\n\n... [文件过长，已截断] ..."
-        return text
+        raw = file_path.read_text(encoding="utf-8", errors="replace")
+
+        if with_line_numbers:
+            lines = raw.splitlines(keepends=True)
+            # 计算行号宽度，保证对齐
+            width = len(str(len(lines)))
+            numbered_lines: List[str] = []
+            char_count = 0
+            for idx, line in enumerate(lines, start=1):
+                prefix = f"{idx:>{width}}| "
+                numbered_line = prefix + line
+                char_count += len(numbered_line)
+                if char_count > max_chars:
+                    numbered_lines.append(
+                        f"\n... [文件过长，已在第 {idx} 行截断，共 {len(lines)} 行] ..."
+                    )
+                    break
+                numbered_lines.append(numbered_line)
+            return "".join(numbered_lines)
+
+        # 不加行号的原始模式
+        if len(raw) > max_chars:
+            raw = raw[:max_chars] + "\n\n... [文件过长，已截断] ..."
+        return raw
+
     except Exception as exc:
         logger.error("读取文件失败 %s: %s", file_path, exc)
         return f"[读取失败: {exc}]"

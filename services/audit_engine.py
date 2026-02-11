@@ -135,13 +135,14 @@ async def run_audit(
     base_url: str,
     model: str,
     max_context_files: int = 80,
+    mode: str = "full",
 ) -> AuditResult:
     """
     执行完整的自适应多专家审计流程。
 
     Steps:
       1. 扫描仓库 → 生成项目画像 (ProjectProfile)
-      2. 根据画像 → 动态组合专家 SYSTEM_PROMPT
+      2. 根据画像 + 审计模式 → 动态组合专家 SYSTEM_PROMPT
       3. 智能筛选核心文件 → 构建代码上下文
       4. 调用 LLM → 生成审计报告
 
@@ -154,6 +155,7 @@ async def run_audit(
         base_url:          OpenAI API Base URL
         model:             模型名称
         max_context_files: 进入 LLM 上下文的最大文件数
+        mode:              审计模式 ("full" 详细 | "brief" 简要)
 
     Returns:
         AuditResult 数据实例
@@ -162,10 +164,10 @@ async def run_audit(
     logger.info("Step 1/4 · 正在识别项目特征…")
     profile = identify_project_context(repo_path)
 
-    # ── Step 2: 动态组合 Prompt ──
-    logger.info("Step 2/4 · 正在组合专家提示词…")
+    # ── Step 2: 动态组合 Prompt（含审计模式）──
+    logger.info("Step 2/4 · 正在组合专家提示词（模式: %s）…", mode)
     library = PromptLibrary()
-    composed = library.compose(profile)
+    composed = library.compose(profile, mode=mode)
 
     # ── Step 3: 智能文件筛选 + 上下文构建 ──
     logger.info("Step 3/4 · 正在收集并筛选核心代码文件…")
